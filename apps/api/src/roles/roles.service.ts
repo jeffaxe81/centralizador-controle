@@ -1,18 +1,21 @@
-import { Injectable, ConflictException } from '@nestjs/common';
+import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { PolicyCompilerService } from '../policy-compiler/policy-compiler.service';
 
 export interface CreateRoleDto {
   name: string;
   description?: string;
 }
 
-// Epico 2 -- RBAC Core: CRUD de papeis. Repare que NENHUM metodo aqui
-// avalia permissao -- isso e responsabilidade do OPA (ver
-// packages/rbac-core/rego/authorization.rego). Este service so administra
-// o estado (PAP), que depois e compilado para o data.json do PolicyBundle.
+// Epico 2 -- RBAC Core: CRUD de papeis + atribuicao de permissao. Toda
+// mudanca que afeta o que uma role concede dispara `recompileAndPublish`,
+// fechando o ciclo ate o PolicyBundle que o OPAL consome.
 @Injectable()
 export class RolesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly policyCompiler: PolicyCompilerService,
+  ) {}
 
   findAll(tenantId: string) {
     return this.prisma.withTenant(tenantId, (tx) =>
@@ -37,8 +40,6 @@ export class RolesService {
         data: { tenantId, name: dto.name, description: dto.description },
       });
 
-      // Auditoria append-only (secao 8 da especificacao) -- toda criacao de
-      // role e registrada, nunca so o CRUD silencioso.
       await tx.auditLog.create({
         data: {
           tenantId,
@@ -52,5 +53,60 @@ export class RolesService {
 
       return role;
     });
+    // Role recem-criada ainda nao tem permissao nenhuma -- nao precisa
+    // recompilar aqui, so quando uma permissao for de fato atribuida.
+  }
+
+  async assignPermission(tenantId: string, roleId: string, permissionId: string, actorId: string) {
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const role = await tx.role.findFirst({ where: { id: roleId, tenantId } });
+      if (!role) throw new NotFoundException('Role nao encontrada');
+
+      const permission = await tx.permission.findFirst({ where: { id: permissionId, tenantId } });
+      if (!permission) throw new NotFoundException('Permission nao encontrada neste tenant');
+
+      await tx.rolePermission.upsert({
+        where: { roleId_permissionId: { roleId, permissionId } },
+        create: { roleId, permissionId },
+        update: {},
+      });
+
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          actorId,
+          action: 'PERMISSION_GRANTED',
+          targetType: 'Role',
+          targetId: roleId,
+          metadata: { permissionId },
+        },
+      });
+    });
+
+    // Recompila FORA da transacao acima -- precisa que o grant ja esteja
+    // commitado antes de recompilar, senao a leitura ve o estado antigo.
+    await this.policyCompiler.recompileAndPublish(tenantId);
+  }
+
+  async revokePermission(tenantId: string, roleId: string, permissionId: string, actorId: string) {
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const role = await tx.role.findFirst({ where: { id: roleId, tenantId } });
+      if (!role) throw new NotFoundException('Role nao encontrada');
+
+      await tx.rolePermission.deleteMany({ where: { roleId, permissionId } });
+
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          actorId,
+          action: 'PERMISSION_REVOKED',
+          targetType: 'Role',
+          targetId: roleId,
+          metadata: { permissionId },
+        },
+      });
+    });
+
+    await this.policyCompiler.recompileAndPublish(tenantId);
   }
 }
