@@ -1,21 +1,29 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
+import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { VaultService } from '../vault/vault.service';
 
 export interface RequestExportDto {
   profileId: string;
   integrationId: string;
 }
 
-// Epico 6 -- fluxo descrito na secao 6 da especificacao: ao finalizar a
-// criacao/edicao de um perfil, o sistema pergunta se deseja exportar, e
-// aqui e onde essa exportacao de fato acontece.
+// Epico 6/8 -- fluxo de exportacao (secao 6 da especificacao) agora
+// completo ate o envio real para REST_JSON: resolve a credencial via
+// VaultService (nunca le a credencial direto do banco) e faz a chamada
+// HTTP de fato, atualizando o status (SUCCESS/FAILED) com o resultado.
 //
-// Escopo desta primeira versao: so sabe executar REST_JSON (decisao do
-// adendo, secao 3). WEBHOOK/ADAPTER ficam com status FAILED e uma mensagem
-// clara -- nao finge que executou algo que nao tem adapter dedicado ainda.
+// WEBHOOK/ADAPTER continuam sem suporte generico (decisao do adendo,
+// secao 3) -- ficam FAILED com mensagem clara ate ganharem adapter
+// dedicado.
 @Injectable()
 export class ProfileExportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly http: HttpService,
+    private readonly vault: VaultService,
+  ) {}
 
   findAllByProfile(tenantId: string, profileId: string) {
     return this.prisma.withTenant(tenantId, (tx) =>
@@ -28,10 +36,12 @@ export class ProfileExportsService {
   }
 
   async requestExport(tenantId: string, dto: RequestExportDto, actorId: string) {
-    return this.prisma.withTenant(tenantId, async (tx) => {
+    const { profile, integration } = await this.prisma.withTenant(tenantId, async (tx) => {
       const profile = await tx.profile.findFirst({
         where: { id: dto.profileId, tenantId },
-        include: { profileRoles: { include: { role: { include: { rolePermissions: { include: { permission: true } } } } } } },
+        include: {
+          profileRoles: { include: { role: true } },
+        },
       });
       if (!profile) throw new NotFoundException('Perfil nao encontrado');
 
@@ -40,37 +50,60 @@ export class ProfileExportsService {
       });
       if (!integration) throw new NotFoundException('Integracao nao encontrada ou inativa');
 
-      // Traduz o perfil para o payload do sistema-alvo usando o fieldMapping
-      // configurado -- driver generico REST/JSON, mapeamento de-para simples
-      // (sem logica condicional, conforme decisao do adendo).
-      const payload = this.translateProfile(profile, integration.fieldMapping as Record<string, string>);
+      return { profile, integration };
+    });
 
-      if (integration.protocol !== 'REST_JSON') {
-        const failedExport = await tx.profileExport.create({
-          data: {
-            tenantId,
-            profileId: profile.id,
-            integrationId: integration.id,
-            payload,
-            status: 'FAILED',
-            errorMessage: `Protocolo ${integration.protocol} requer adapter dedicado, ainda nao implementado`,
-          },
-        });
-        return failedExport;
-      }
+    const payload = this.translateProfile(profile, integration.fieldMapping as Record<string, string>);
 
-      // Stub de envio HTTP -- o Epico 6 real precisa de um HttpService
-      // configurado com o credentialRef resolvido contra o vault. Aqui so
-      // registramos a intencao como PENDING, sem chamar rede nenhuma,
-      // ate essa peca (resolucao de credencial) estar implementada.
-      const profileExport = await tx.profileExport.create({
-        data: {
-          tenantId,
-          profileId: profile.id,
-          integrationId: integration.id,
-          payload,
-          status: 'PENDING',
-        },
+    // Cria o registro como PENDING primeiro -- se o envio falhar (rede,
+    // credencial, timeout), o registro ja existe para consulta/retentativa
+    // manual, em vez de perder o rastro da tentativa.
+    let profileExportId: string;
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const created = await tx.profileExport.create({
+        data: { tenantId, profileId: profile.id, integrationId: integration.id, payload, status: 'PENDING' },
+      });
+      profileExportId = created.id;
+    });
+
+    if (integration.protocol !== 'REST_JSON') {
+      return this.finalizeExport(
+        tenantId,
+        profileExportId!,
+        actorId,
+        'FAILED',
+        `Protocolo ${integration.protocol} requer adapter dedicado, ainda nao implementado`,
+      );
+    }
+
+    try {
+      const credential = await this.vault.resolveSecret(integration.credentialRef);
+
+      await firstValueFrom(
+        this.http.post(integration.baseUrl, payload, {
+          headers: { Authorization: `Bearer ${credential}` },
+          timeout: 10_000,
+        }),
+      );
+
+      return this.finalizeExport(tenantId, profileExportId!, actorId, 'SUCCESS');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erro desconhecido ao exportar perfil';
+      return this.finalizeExport(tenantId, profileExportId!, actorId, 'FAILED', message);
+    }
+  }
+
+  private async finalizeExport(
+    tenantId: string,
+    profileExportId: string,
+    actorId: string,
+    status: 'SUCCESS' | 'FAILED',
+    errorMessage?: string,
+  ) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const updated = await tx.profileExport.update({
+        where: { id: profileExportId },
+        data: { status, errorMessage },
       });
 
       await tx.auditLog.create({
@@ -79,12 +112,12 @@ export class ProfileExportsService {
           actorId,
           action: 'PROFILE_EXPORTED',
           targetType: 'ProfileExport',
-          targetId: profileExport.id,
-          metadata: { profileId: profile.id, integrationId: integration.id },
+          targetId: updated.id,
+          metadata: { status, errorMessage },
         },
       });
 
-      return profileExport;
+      return updated;
     });
   }
 

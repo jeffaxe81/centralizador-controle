@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from './prisma/prisma.module';
+import { VaultModule } from './vault/vault.module';
 import { RolesModule } from './roles/roles.module';
 import { ModulesRegistryModule } from './modules-registry/modules-registry.module';
 import { ProfilesModule } from './profiles/profiles.module';
@@ -10,6 +11,7 @@ import { IngestionModule } from './ingestion/ingestion.module';
 @Module({
   imports: [
     PrismaModule,
+    VaultModule,
     RolesModule,
     ModulesRegistryModule,
     ProfilesModule,
