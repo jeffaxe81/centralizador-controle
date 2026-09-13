@@ -1,0 +1,314 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tenant: toda entidade de negócio carrega tenantId (ver seção 3.2 da
+// especificação técnica). Row-Level Security (RLS) é aplicada via SQL manual
+// (ver rls_policies.sql), usando a variável de sessão `app.current_tenant_id`
+// setada a cada requisição pela API.
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  roles           Role[]
+  permissions     Permission[]
+  profiles        Profile[]
+  integrations    Integration[]
+  profileExports  ProfileExport[]
+  auditLogs       AuditLog[]
+  ingestedRecords IngestedRecord[]
+  policyBundles   PolicyBundle[]
+
+  @@map("tenants")
+}
+
+// ---------------------------------------------------------------------------
+// Module Registry — catálogo de módulos da plataforma (Despacho, CRM,
+// Motor de Eventos, futuros). Não é escopado por tenant: é o mesmo catálogo
+// de módulos para todos os tenants. O que é escopado por tenant é a
+// Integration (configuração de acesso a cada sistema), mais abaixo.
+// ---------------------------------------------------------------------------
+
+model Module {
+  id          String   @id @default(uuid())
+  key         String   @unique // ex.: "despacho", "crm-vendas", "motor-eventos"
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  scopes ModuleScope[]
+
+  @@map("modules")
+}
+
+enum Action {
+  CREATE
+  READ
+  UPDATE
+  DELETE
+  EXECUTE
+}
+
+// Escopo declarado por um módulo, versionado (seção 5 do adendo técnico —
+// toda evolução de escopo é registrada aqui, nunca alterada "por fora").
+model ModuleScope {
+  id           String    @id @default(uuid())
+  moduleId     String
+  module       Module    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  resource     String    // ex.: "ticket", "contact", "campaign"
+  action       Action
+  description  String?
+  version      Int       @default(1)
+  deprecatedAt DateTime?
+  createdAt    DateTime  @default(now())
+
+  permissions Permission[]
+
+  @@unique([moduleId, resource, action, version])
+  @@map("module_scopes")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC Core
+// ---------------------------------------------------------------------------
+
+enum PermissionScope {
+  GLOBAL
+  ORGANIZATION
+  MODULE
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Herança de papéis (self-relation N:N) — seção 4.2 da especificação
+  inheritsFrom Role[] @relation("RoleInheritance")
+  inheritedBy  Role[] @relation("RoleInheritance")
+
+  rolePermissions RolePermission[]
+  profileRoles    ProfileRole[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+model Permission {
+  id            String          @id @default(uuid())
+  tenantId      String
+  tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  moduleScopeId String
+  moduleScope   ModuleScope     @relation(fields: [moduleScopeId], references: [id])
+  scope         PermissionScope @default(MODULE)
+  version       Int             @default(1)
+  createdAt     DateTime        @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, moduleScopeId, scope])
+  @@index([tenantId])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// Perfis de acesso
+// ---------------------------------------------------------------------------
+
+model Profile {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profileRoles   ProfileRole[]
+  profileExports ProfileExport[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("profiles")
+}
+
+model ProfileRole {
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  roleId    String
+  role      Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([profileId, roleId])
+  @@map("profile_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Integration Registry — cadastro configurável de sistemas externos, por
+// tenant (cada organização pode ter instâncias/credenciais próprias).
+// Escopo do driver genérico limitado a REST/JSON (seção 3 do adendo); casos
+// mais complexos usam ADAPTER dedicado.
+// ---------------------------------------------------------------------------
+
+enum IntegrationProtocol {
+  REST_JSON
+  WEBHOOK
+  ADAPTER
+}
+
+model Integration {
+  id       String              @id @default(uuid())
+  tenantId String
+  tenant   Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name     String
+  protocol IntegrationProtocol @default(REST_JSON)
+  baseUrl  String
+
+  // Credenciais NUNCA ficam no banco — apenas uma referência ao segredo no
+  // vault (ex.: HashiCorp Vault), conforme decisão da seção 4 do adendo.
+  credentialRef String
+
+  fieldMapping Json // mapeamento de-para simples de campos (REST/JSON)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profileExports ProfileExport[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("integrations")
+}
+
+// ---------------------------------------------------------------------------
+// Exportação de perfis
+// ---------------------------------------------------------------------------
+
+enum ExportStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model ProfileExport {
+  id            String       @id @default(uuid())
+  tenantId      String
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  profileId     String
+  profile       Profile      @relation(fields: [profileId], references: [id])
+  integrationId String
+  integration   Integration  @relation(fields: [integrationId], references: [id])
+  payload       Json
+  status        ExportStatus @default(PENDING)
+  errorMessage  String?
+  createdAt     DateTime     @default(now())
+
+  @@index([tenantId])
+  @@map("profile_exports")
+}
+
+// ---------------------------------------------------------------------------
+// Ingestão de dados dos sistemas integrados
+// ---------------------------------------------------------------------------
+
+model IngestedRecord {
+  id           String    @id @default(uuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceSystem String    // ex.: "despacho", "crm-vendas"
+  recordType   String    // ex.: "user_deactivated", "user_created"
+  rawPayload   Json
+  processedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([tenantId])
+  @@map("ingested_records")
+}
+
+// ---------------------------------------------------------------------------
+// Auditoria append-only — nunca UPDATE/DELETE em produção, apenas INSERT.
+// Inclui o registro de exceções locais com justificativa (seção 6 do adendo).
+// ---------------------------------------------------------------------------
+
+enum AuditAction {
+  ROLE_CREATED
+  ROLE_UPDATED
+  PERMISSION_GRANTED
+  PERMISSION_REVOKED
+  PROFILE_CREATED
+  PROFILE_UPDATED
+  PROFILE_EXPORTED
+  LOCAL_EXCEPTION_REGISTERED
+  DATA_INGESTED
+  INTEGRATION_CREATED
+  INTEGRATION_UPDATED
+}
+
+model AuditLog {
+  id         String      @id @default(uuid())
+  tenantId   String
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actorId    String // id do usuário/serviço que executou a ação
+  action     AuditAction
+  targetType String // ex.: "Role", "Profile", "Permission"
+  targetId   String
+  metadata   Json? // inclui, quando aplicável, a justificativa (seção 6 do adendo)
+  createdAt  DateTime    @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Policy Bundle — rastreia a compilação de Role/Permission/Profile para os
+// dados consumidos pela política Rego, e sua publicação via OPAL (decisão de
+// arquitetura registrada na seção 9 do adendo técnico).
+//
+// Achado da POC (packages/rbac-core/rego/authorization.rego, validado com
+// `opa test`): a política Rego é ESTÁTICA e compartilhada por todos os
+// tenants — só os dados (roles_permissions, local_restrictions) variam por
+// tenant/versão. Por isso `staticPolicyVersion` guarda a versão da política
+// estática vigente (ex.: "1.0.0"), não um Rego gerado por tenant.
+// ---------------------------------------------------------------------------
+
+model PolicyBundle {
+  id                  String    @id @default(uuid())
+  tenantId            String
+  tenant              Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  version             Int
+  staticPolicyVersion String    @default("1.0.0")
+  dataJson            Json
+  publishedAt         DateTime?
+  createdAt           DateTime  @default(now())
+
+  @@unique([tenantId, version])
+  @@index([tenantId])
+  @@map("policy_bundles")
+}

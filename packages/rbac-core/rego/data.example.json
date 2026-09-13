@@ -1,0 +1,8 @@
+{
+  "roles_permissions": {
+    "atendente_despacho": [
+      { "module": "despacho", "resource": "ticket", "action": "read" }
+    ]
+  },
+  "local_restrictions": {}
+}
