@@ -31,7 +31,8 @@ DECLARE
     'profile_exports',
     'ingested_records',
     'audit_logs',
-    'policy_bundles'
+    'policy_bundles',
+    'local_exceptions'
   ];
 BEGIN
   FOREACH t IN ARRAY tenant_tables LOOP
@@ -63,6 +64,9 @@ CREATE POLICY tenant_isolation ON audit_logs
   USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
 CREATE POLICY tenant_isolation ON policy_bundles
+  USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON local_exceptions
   USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
 -- Tabelas de junção sem tenant_id próprio: isolamento via join com a tabela

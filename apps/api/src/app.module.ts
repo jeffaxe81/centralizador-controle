@@ -10,6 +10,7 @@ import { IntegrationsModule } from './integrations/integrations.module';
 import { ProfileExportsModule } from './profile-exports/profile-exports.module';
 import { IngestionModule } from './ingestion/ingestion.module';
 import { PolicyBundlesModule } from './policy-bundles/policy-bundles.module';
+import { LocalExceptionsModule } from './local-exceptions/local-exceptions.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { PolicyBundlesModule } from './policy-bundles/policy-bundles.module';
     ProfileExportsModule,
     IngestionModule,
     PolicyBundlesModule,
+    LocalExceptionsModule,
   ],
 })
 export class AppModule {}

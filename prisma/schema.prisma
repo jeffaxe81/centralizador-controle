@@ -27,6 +27,7 @@ model Tenant {
   auditLogs       AuditLog[]
   ingestedRecords IngestedRecord[]
   policyBundles   PolicyBundle[]
+  localExceptions LocalException[]
 
   @@map("tenants")
 }
@@ -266,6 +267,7 @@ enum AuditAction {
   PROFILE_UPDATED
   PROFILE_EXPORTED
   LOCAL_EXCEPTION_REGISTERED
+  LOCAL_EXCEPTION_REVOKED
   DATA_INGESTED
   INTEGRATION_CREATED
   INTEGRATION_UPDATED
@@ -311,4 +313,31 @@ model PolicyBundle {
   @@unique([tenantId, version])
   @@index([tenantId])
   @@map("policy_bundles")
+}
+
+// ---------------------------------------------------------------------------
+// Local Exception -- excecao local com justificativa registrada (secao 6
+// do adendo tecnico). Um RBAC local de modulo so pode RESTRINGIR um
+// acesso ja concedido pelo centralizador, nunca conceder algo a mais
+// (secao 4.3 da especificacao) -- esta tabela e onde essa restricao,
+// com justificativa obrigatoria, fica registrada. E o dado que o
+// PolicyCompilerService le para preencher `local_restrictions` no
+// PolicyBundle (ver policy-compiler.service.ts).
+// ---------------------------------------------------------------------------
+
+model LocalException {
+  id            String    @id @default(uuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  moduleKey     String    // ex.: "despacho" -- corresponde a Module.key
+  resource      String
+  action        Action
+  reason        String    @db.Text // obrigatorio -- nunca aceitar excecao sem justificativa
+  registeredBy  String    // actorId de quem registrou
+  approvedBy    String?   // aprovacao em dois passos (backlog da especificacao) -- opcional por ora
+  revokedAt     DateTime? // excecao pode ser revogada sem apagar o historico
+  createdAt     DateTime  @default(now())
+
+  @@index([tenantId, moduleKey])
+  @@map("local_exceptions")
 }
