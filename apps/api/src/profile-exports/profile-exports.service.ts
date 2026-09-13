@@ -58,7 +58,7 @@ export class ProfileExportsService {
     // Cria o registro como PENDING primeiro -- se o envio falhar (rede,
     // credencial, timeout), o registro ja existe para consulta/retentativa
     // manual, em vez de perder o rastro da tentativa.
-    let profileExportId: string;
+    let profileExportId!: string; // atribuido dentro do withTenant abaixo -- assertion de atribuicao definitiva, TS nao ve atribuicao atraves de closures
     await this.prisma.withTenant(tenantId, async (tx) => {
       const created = await tx.profileExport.create({
         data: { tenantId, profileId: profile.id, integrationId: integration.id, payload, status: 'PENDING' },
