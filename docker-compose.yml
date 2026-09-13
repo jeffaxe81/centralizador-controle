@@ -1,0 +1,76 @@
+# Stack de desenvolvimento local: Postgres + API (centralizador-controle)
+# + OPAL server + OPAL client (com OPA embutido).
+#
+# LACUNAS CONHECIDAS antes de usar isto de verdade:
+#   1. Nada ainda recompila/publica um novo PolicyBundle quando um
+#      Role/Permission/Profile muda -- o endpoint /policy-bundles/:tenantId/data
+#      so LE o ultimo bundle salvo (ver policy-bundles.service.ts). Sem
+#      rodar esse job manualmente (ou implementa-lo), o OPAL nao vai ter
+#      dado nenhum para buscar.
+#   2. OPAL_POLICY_REPO_URL abaixo aponta para o repositorio publico no
+#      GitHub -- ajuste para o remote real se for diferente, e garanta que
+#      o branch/path estejam corretos.
+#   3. INGESTION_API_KEY e OPAL_AUTH_* sao placeholders -- trocar por
+#      valores fortes antes de qualquer uso alem de desenvolvimento local.
+
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: centralizador
+      POSTGRES_PASSWORD: centralizador
+      POSTGRES_DB: centralizador_controle
+    ports:
+      - "5432:5432"
+    volumes:
+      - centralizador_pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://centralizador:centralizador@postgres:5432/centralizador_controle?schema=public
+      INGESTION_API_KEY: troque-por-uma-chave-forte
+      # EXEMPLO_CREDENTIAL: preencher para integracoes com credentialRef=env:EXEMPLO_CREDENTIAL
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+
+  opal-server:
+    image: permitio/opal-server:latest
+    environment:
+      OPAL_POLICY_REPO_URL: https://github.com/jeffaxe81/centralizador-controle
+      OPAL_POLICY_REPO_MAIN_BRANCH: main
+      OPAL_POLICY_REPO_POLLING_INTERVAL: "30"
+      # Caminho dentro do repo onde vive a politica estatica (ver secao 9
+      # do adendo tecnico -- Rego compartilhado entre tenants).
+      OPAL_POLICY_REPO_PATH: packages/rbac-core/rego
+      OPAL_DATA_CONFIG_SOURCES: |
+        {"config":{"entries":[
+          {"url":"http://api:3001/policy-bundles/REPLACE_TENANT_ID/data",
+           "headers":{"x-integration-api-key":"troque-por-uma-chave-forte"},
+           "topics":["policy_data"],
+           "dst_path":"/"}
+        ]}}
+    ports:
+      - "7002:7002"
+    depends_on:
+      - api
+
+  opal-client:
+    image: permitio/opal-client:latest
+    environment:
+      OPAL_SERVER_URL: http://opal-server:7002
+      OPAL_INLINE_OPA_ENABLED: "true"
+      OPAL_INLINE_OPA_CONFIG: '{"addr": ":8181"}'
+    ports:
+      - "8181:8181" # API do OPA embutido -- simula o sidecar de um modulo (ex.: Despacho)
+    depends_on:
+      - opal-server
+
+volumes:
+  centralizador_pgdata:

@@ -7,6 +7,7 @@ import { ProfilesModule } from './profiles/profiles.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { ProfileExportsModule } from './profile-exports/profile-exports.module';
 import { IngestionModule } from './ingestion/ingestion.module';
+import { PolicyBundlesModule } from './policy-bundles/policy-bundles.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { IngestionModule } from './ingestion/ingestion.module';
     IntegrationsModule,
     ProfileExportsModule,
     IngestionModule,
+    PolicyBundlesModule,
   ],
 })
 export class AppModule {}
